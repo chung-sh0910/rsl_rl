@@ -13,7 +13,7 @@ from itertools import chain
 from rsl_rl.modules import ActorCritic
 from rsl_rl.modules.rnd import RandomNetworkDistillation
 from rsl_rl.storage import RolloutStorage
-from rsl_rl.utils import string_to_callable
+from rsl_rl.utils import string_to_callable, unpad_trajectories
 
 
 class PPO:
@@ -39,6 +39,8 @@ class PPO:
         desired_kl=0.01,
         device="cpu",
         normalize_advantage_per_mini_batch=False,
+        # Auxiliary velocity-prediction loss (used with policies exposing `predict_vel`)
+        vel_loss_coef=0.0,
         # RND parameters
         rnd_cfg: dict | None = None,
         # Symmetry parameters
@@ -114,6 +116,7 @@ class PPO:
         self.schedule = schedule
         self.learning_rate = learning_rate
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
+        self.vel_loss_coef = vel_loss_coef
 
     def init_storage(self, training_type, num_envs, num_transitions_per_env, obs, actions_shape):
         # create rollout storage
@@ -189,6 +192,11 @@ class PPO:
             mean_symmetry_loss = 0
         else:
             mean_symmetry_loss = None
+        # -- Auxiliary velocity loss
+        if self.vel_loss_coef > 0.0 and hasattr(self.policy, "predict_vel"):
+            mean_vel_loss = 0
+        else:
+            mean_vel_loss = None
 
         # generator for mini batches
         if self.policy.is_recurrent:
@@ -314,6 +322,20 @@ class PPO:
 
             loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
 
+            # Auxiliary velocity-prediction loss
+            # The actor's `act()` above caches the (unpadded) RNN latent, so `predict_vel()` is aligned with the
+            # unpadded action outputs. The supervision target is the `vel_obs_key` observation group, which must be
+            # unpadded with the same trajectory masks before comparison.
+            if mean_vel_loss is not None:
+                vel_pred = self.policy.predict_vel()
+                vel_target = obs_batch[self.policy.vel_obs_key]
+                if masks_batch is not None:
+                    vel_target = unpad_trajectories(vel_target, masks_batch)
+                vel_target = vel_target[:original_batch_size]
+                vel_pred = vel_pred[:original_batch_size]
+                vel_loss = (vel_pred - vel_target).pow(2).mean()
+                loss = loss + self.vel_loss_coef * vel_loss
+
             # Symmetry loss
             if self.symmetry:
                 # obtain the symmetric actions
@@ -393,6 +415,9 @@ class PPO:
             # -- Symmetry loss
             if mean_symmetry_loss is not None:
                 mean_symmetry_loss += symmetry_loss.item()
+            # -- Velocity loss
+            if mean_vel_loss is not None:
+                mean_vel_loss += vel_loss.item()
 
         # -- For PPO
         num_updates = self.num_learning_epochs * self.num_mini_batches
@@ -405,6 +430,9 @@ class PPO:
         # -- For Symmetry
         if mean_symmetry_loss is not None:
             mean_symmetry_loss /= num_updates
+        # -- For Velocity
+        if mean_vel_loss is not None:
+            mean_vel_loss /= num_updates
         # -- Clear the storage
         self.storage.clear()
 
@@ -418,6 +446,8 @@ class PPO:
             loss_dict["rnd"] = mean_rnd_loss
         if self.symmetry:
             loss_dict["symmetry"] = mean_symmetry_loss
+        if mean_vel_loss is not None:
+            loss_dict["vel"] = mean_vel_loss
 
         return loss_dict
 

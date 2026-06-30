@@ -188,3 +188,40 @@ class ActorCriticRecurrent(nn.Module):
 
         super().load_state_dict(state_dict, strict=strict)
         return True
+
+
+class ActorCriticRecurrentVel(ActorCriticRecurrent):
+    """Recurrent actor-critic with an auxiliary velocity-prediction head.
+
+    The velocity head takes the actor RNN latent and predicts a velocity vector (default 3-dim). The prediction is
+    supervised by the ``vel_obs_key`` observation group through an auxiliary loss computed in :class:`PPO`. The base
+    policy behaviour (action sampling, inference, export) is unchanged.
+    """
+
+    def __init__(
+        self,
+        *args,
+        vel_obs_key: str = "aux_vel",
+        vel_head_hidden_dim: int = 256,
+        vel_dim: int = 3,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.vel_obs_key = vel_obs_key
+        rnn_hidden_dim = self.memory_a.rnn.hidden_size
+        self.vel_head = nn.Sequential(
+            nn.Linear(rnn_hidden_dim, vel_head_hidden_dim),
+            nn.ELU(),
+            nn.Linear(vel_head_hidden_dim, vel_dim),
+        )
+        # latent cached on every actor forward pass (set in update_distribution)
+        self._cached_latent = None
+
+    def update_distribution(self, latent):
+        # `latent` is the actor RNN output passed by `act()`
+        self._cached_latent = latent
+        super().update_distribution(latent)
+
+    def predict_vel(self):
+        assert self._cached_latent is not None, "predict_vel() called before any actor forward pass."
+        return self.vel_head(self._cached_latent)
