@@ -41,6 +41,7 @@ class PPO:
         clip_param: float = 0.2,
         gamma: float = 0.99,
         lam: float = 0.95,
+        vel_loss_coef: float = 1.0,
         value_loss_coef: float = 1.0,
         entropy_coef: float = 0.01,
         learning_rate: float = 0.001,
@@ -92,6 +93,9 @@ class PPO:
         self.optimizer = resolve_optimizer(optimizer)(
             chain(self.actor.parameters(), self.critic.parameters()), lr=learning_rate
         )  # type: ignore
+
+        # custom loss
+        self.vel_loss_coef = vel_loss_coef
 
         # Add storage
         self.storage = storage
@@ -277,6 +281,16 @@ class PPO:
 
             loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy.mean()
 
+            if hasattr(self.actor, "predict_vel"):
+                vel_pred = self.actor.predict_vel()
+                vel_gt = batch.observations["aux_vel"]
+                if batch.masks is not None:
+                    mask = batch.masks.unsqueeze(-1)
+                    vel_loss = ((vel_pred - vel_gt).pow(2) * mask).sum() / (mask.sum() + 1e-8)
+                else:
+                    vel_loss = (vel_pred - vel_gt).pow(2).mean()
+                loss = loss + self.vel_loss_coef * vel_loss
+
             # RND loss
             rnd_loss = self.rnd.compute_loss(batch.observations[:original_batch_size]) if self.rnd else None  # type: ignore
 
@@ -333,6 +347,9 @@ class PPO:
             "surrogate": mean_surrogate_loss,
             "entropy": mean_entropy,
         }
+        if hasattr(self.actor, "predict_vel"):
+            loss["vel"] = vel_loss / num_updates
+
         if self.rnd:
             loss_dict["rnd"] = mean_rnd_loss
         if self.symmetry:

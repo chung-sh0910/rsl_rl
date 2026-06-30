@@ -247,3 +247,26 @@ class _OnnxRNNModel(nn.Module):
         if self.rnn_type == "lstm":
             return ["actions", "h_out", "c_out"]
         return ["actions", "h_out"]
+
+
+class RNNModelWithVelHead(RNNModel):
+    def __init__(self, *args, vel_obs_key: str = "base_lin_vel", vel_head_hidden_dim: int = 256, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.vel_obs_key = vel_obs_key
+        self.vel_head = nn.Sequential(
+            nn.Linear(self.latent_dim, vel_head_hidden_dim),
+            nn.ELU(),
+            nn.Linear(vel_head_hidden_dim, 3),
+        )
+        self._cached_latent: torch.Tensor | None = None
+
+
+    def get_latent(self, obs: TensorDict, masks=None, hidden_state=None):
+        latent = super().get_latent(obs, masks, hidden_state)
+        self._cached_latent = latent
+        return latent
+    
+    def predict_vel(self) -> torch.Tensor:
+        assert self._cached_latent is not None
+        return self.vel_head(self._cached_latent)
+    
